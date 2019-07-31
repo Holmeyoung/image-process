@@ -4,7 +4,8 @@ import shutil
 import scipy.fftpack
 from PIL import Image
 import numpy
-from tqdm import tqdm
+from multiprocessing import Manager, Pool
+import sys
 
 pic_suffix = set()
 pic_suffix.update(['.BMP', '.DIB', '.JPEG', '.JPG', '.JPE', '.PNG', '.PBM', '.PGM', '.PPM', '.SR', '.RAS', '.TIFF', '.TIF', '.EXR', '.JP2'])
@@ -32,59 +33,66 @@ def hamming_distance(s0, s1):
         raise ValueError("Length must be the same!")
     return sum(el1 != el2 for el1, el2 in zip(s0, s1))
 
-def get_hash_bucket(folder):
+def get_hash_queue(i, n, image_path, q_put):
+    sys.stdout.write("\rLoading process: {}/{}".format(str(n-i), str(n)))
+    sys.stdout.flush()
+
+    try:
+        # not image
+        if os.path.splitext(image_path)[-1].upper() not in pic_suffix:
+            print ('Not image %s' % (image_path))
+            return
+
+        image = Image.open(image_path)
+    except:
+        # catch except
+        print ('Image read except %s' % (image_path))
+        return
+    else:
+        # split into 4 bucket
+        hash_result = phash(image)
+        hash0 = hash_result[0:4]
+        hash1 = hash_result[4:8]
+        hash2 = hash_result[8:12]
+        hash3 = hash_result[12:16]
+        q_put.put_nowait([image_path, hash_result, [hash0, hash1, hash2, hash3]])
+        return
+
+def get_hash_bucket(q_put):
     hash_bucket0 = {}
     hash_bucket1 = {}
     hash_bucket2 = {}
     hash_bucket3 = {}
     image_bucket = {}
-    pics = os.listdir(folder)
-    for pic in tqdm(pics):
-        image_path = os.path.join(folder, pic)
-        try:
-            # not image
-            if os.path.splitext(image_path)[-1].upper() not in pic_suffix:
-                print ('Not image %s' % (image_path))
-                continue
-            
-            # image is none
-            image = Image.open(image_path)
-            if image is None:
-                print ('Image none: %s' % (image_path))
-                continue
-        except:
-            # catch except
-            print ('Image read except %s' % (image_path))
+    while True:
+        image_path, hash_result, hash_part = q_put.get()
+        hash0, hash1, hash2, hash3 = hash_part
+
+        if hash0 in hash_bucket0:
+            hash_bucket0[hash0].append(image_path)
         else:
-            # split into 4 bucket
-            hash_result = phash(image)
-            hash0 = hash_result[0:4]
-            hash1 = hash_result[4:8]
-            hash2 = hash_result[8:12]
-            hash3 = hash_result[12:16]
+            hash_bucket0[hash0] = [image_path]
 
-            if hash0 in hash_bucket0:
-                hash_bucket0[hash0].append(image_path)
-            else:
-                hash_bucket0[hash0] = [image_path]
+        if hash1 in hash_bucket1:
+            hash_bucket1[hash1].append(image_path)
+        else:
+            hash_bucket1[hash1] = [image_path]
 
-            if hash1 in hash_bucket1:
-                hash_bucket1[hash1].append(image_path)
-            else:
-                hash_bucket1[hash1] = [image_path]
+        if hash2 in hash_bucket2:
+            hash_bucket2[hash2].append(image_path)
+        else:
+            hash_bucket2[hash2] = [image_path]
 
-            if hash2 in hash_bucket2:
-                hash_bucket2[hash2].append(image_path)
-            else:
-                hash_bucket2[hash2] = [image_path]
+        if hash3 in hash_bucket3:
+            hash_bucket3[hash3].append(image_path)
+        else:
+            hash_bucket3[hash3] = [image_path]
+        
+        image_bucket[image_path] = [hash_result, hash_part]
 
-            if hash3 in hash_bucket3:
-                hash_bucket3[hash3].append(image_path)
-            else:
-                hash_bucket3[hash3] = [image_path]
-            
-            image_bucket[image_path] = [hash_result, [hash0, hash1, hash2, hash3]]
-
+        if q_put.qsize() == 0:
+            break
+    
     return image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, hash_bucket3
 
 def image_deduplication(image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, hash_bucket3):
@@ -127,9 +135,38 @@ def image_deduplication(image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, 
             compared_bucket.add(tuple(sorted((image_i, image_j))))
 
 if __name__ == "__main__":
+    # init parser
     parser = argparse.ArgumentParser()
     parser.add_argument('-f', '--folder', type = str, required = True, help = 'path to folder which contains the images')
+    parser.add_argument('-p', '--process', type = int, required = True, help = 'process number to get image hash', default = 4)
     args = parser.parse_args()
 
-    image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, hash_bucket3 = get_hash_bucket(args.folder)
+    # init pool and queue
+    q_get = Manager().Queue()
+    q_put = Manager().Queue()
+    pool = Pool(processes = args.process)
+
+    # put pic path into get queue: q_get
+    pics = os.listdir(args.folder)
+    for pic in pics:
+        path = os.path.join(args.folder, pic)
+        q_get.put(path)
+    
+    # use multi process to get hash result and put the result into q_put
+    n = q_get.qsize()
+    while True:
+        try:
+            image_path = q_get.get_nowait()
+            i = q_get.qsize()
+        except:
+            break
+        else:
+            pool.apply_async(get_hash_queue, (i, n, image_path, q_put, ))
+    pool.close()
+    pool.join()
+
+    sys.stdout.write('\n')
+    # get hash bucket
+    image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, hash_bucket3 = get_hash_bucket(q_put)
+    # image deduplicate
     image_deduplication(image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, hash_bucket3)
