@@ -91,7 +91,7 @@ def image_deduplication(image_bucket, hash_bucket0, hash_bucket1, hash_bucket2, 
     os.makedirs('./trash', exist_ok=True)
     compared_bucket = set()
     trash_bucket = set()
-    for image_i, hash_set in tqdm(image_bucket.items()):
+    for image_i, hash_set in image_bucket.items():
         # if in trash_bucket, no need to compare
         if image_i in trash_bucket:
             continue
